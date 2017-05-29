@@ -7,20 +7,19 @@
 # Author: Kyle Lahnakoski (kyle@lahnakoski.com)
 #
 
-from __future__ import unicode_literals
 from __future__ import division
-import ast
+from __future__ import unicode_literals
 
+import ast
 import re
 
-from pyLibrary import convert, strings
-from pyLibrary.debugs.exceptions import suppress_exception
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import wrap, Dict, coalesce, set_default, unwraplist, listwrap
+from mo_dots import wrap, Data, coalesce, set_default, unwraplist, listwrap
+from pyLibrary import convert
+from mo_logs.exceptions import suppress_exception
+from mo_logs import Log, strings
 from pyLibrary.env import elasticsearch
-from pyLibrary.maths import Math
-from pyLibrary.queries import jx
-from pyLibrary.times.dates import Date, unicode2Date
+from mo_math import Math
+from mo_times.dates import Date, unicode2Date
 
 BUILDBOT_LOGS = "http://builddata.pub.build.mozilla.org/builddata/buildjson/"
 
@@ -32,7 +31,7 @@ class BuildbotTranslator(object):
 
     def parse(self, data):
         data = wrap(data)
-        output = Dict()
+        output = Data()
 
         if data.build.times:
             if len(data.build.times) != 2:
@@ -41,7 +40,7 @@ class BuildbotTranslator(object):
             data = data.build
 
         if isinstance(data.properties, list):
-            props = data.properties = Dict(**{a: b for a, b, c in data.properties})
+            props = data.properties = Data(**{a: b for a, b, c in data.properties})
         else:
             props = data.properties.copy()
 
@@ -83,7 +82,7 @@ class BuildbotTranslator(object):
             ratio = RATIO_PATTERN.match(buildername.split("_")[-1])
             if ratio:
                 output.action.step = ratio.groups()[0]
-        except Exception, e:
+        except Exception as e:
             Log.error("problem in\n{{data|json}}", data=data, cause=e)
 
         # SCRIPT
@@ -169,7 +168,7 @@ class BuildbotTranslator(object):
                     {"name": name, "url": url}
                     for name, url in files.items()
                 ]
-        except Exception, e:
+        except Exception as e:
             Log.error("Malformed `blobber_files` buildbot property: {{json}}", json=blobber_files, cause=e)
 
         # PRODUCT
@@ -243,7 +242,7 @@ class BuildbotTranslator(object):
                 "jetpack-(.*)-{{platform}}-{{type}}",
                 {
                     "platform": raw_platform,
-                    "type": unwraplist(output.build.type)
+                    "type": unwraplist(list(set(listwrap(output.build.type))))
                 }
             ), buildername)
 
@@ -261,7 +260,7 @@ class BuildbotTranslator(object):
                     self.unknown_platforms += [raw_platform]
                     Log.error("Platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                 else:
-                    return Dict()  # ERROR INGNORED, ALREADY SENT
+                    return Data()  # ERROR INGNORED, ALREADY SENT
             set_default(output, KNOWN_PLATFORM[raw_platform])
         elif buildername.endswith("nightly"):
             output.build.trigger = "nightly"
@@ -297,10 +296,10 @@ class BuildbotTranslator(object):
                         self.unknown_platforms += [raw_platform]
                         Log.error("Test platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                     else:
-                        return Dict()  # ERROR INGNORED, ALREADY SENT
+                        return Data()  # ERROR INGNORED, ALREADY SENT
                 set_default(output, TEST_PLATFORMS[raw_platform])
                 output.action.type = "build"
-            except Exception, e:
+            except Exception as e:
                 raise Log.error("Not recognized: {{key}}\n{{data|json}}", key=buildername, data=data, cause=e)
 
             for t in BUILD_TYPES:
@@ -333,7 +332,7 @@ class BuildbotTranslator(object):
                     self.unknown_platforms += [raw_platform]
                     Log.error("Test Platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                 else:
-                    return Dict()  # ERROR INGNORED, ALREADY SENT
+                    return Data()  # ERROR INGNORED, ALREADY SENT
 
             set_default(output, TEST_PLATFORMS[raw_platform])
 
@@ -356,11 +355,11 @@ def consume(props, key):
 
 
 def verify(output, data):
-    output.run.type = unwraplist(list(set(listwrap(output.run.type))))
-    output.build.type = unwraplist(list(set(listwrap(output.build.type))))
-    output.build.tags = unwraplist(list(set(output.build.tags)))
+    output.run.type = list(set(listwrap(output.run.type)))
+    output.build.type = list(set(listwrap(output.build.type)))
+    output.build.tags = list(set(output.build.tags))
 
-    if "e10s" in data.properties.buildername.lower() and output.run.type != 'e10s':
+    if "e10s" in data.properties.buildername.lower() and 'e10s' not in output.run.type:
         Log.error("Did not pickup e10s in\n{{data|json}}", data=data)
     if output.run.machine.os != None and output.run.machine.os not in ALLOWED_OS:
         ALLOWED_OS.append(output.run.machine.os)
@@ -410,7 +409,7 @@ def normalize_other(other):
     """
     the buildbot properties are unlimited in their number of keys
     """
-    known = Dict()
+    known = Data()
     unknown = []
     for k, v in other.items():
         v = elasticsearch.scrub(v)
@@ -424,7 +423,7 @@ def normalize_other(other):
         if k not in unknown_properties:
             Log.alert("unknown properties: {{name|json}}", name=unknown_properties)
         unknown_properties[k] += 1
-        if isinstance(v, (list, dict, Dict)):
+        if isinstance(v, (list, dict, Data)):
             unknown.append({"name": unicode(k), "value": convert.value2json(v)})
         elif Math.is_number(v):
             unknown.append({"name": unicode(k), "value": convert.value2number(v)})
@@ -464,7 +463,7 @@ known_properties = {
     "uploadFiles"
 }
 
-unknown_properties=Dict()
+unknown_properties=Data()
 
 
 test_modes = {
@@ -477,7 +476,6 @@ test_modes = {
 }
 
 BUILDER_NAMES = [
-
     '{{branch}}-{{product}}_{{platform}}_build',
     '{{branch}}-{{product}}_antivirus',
     '{{branch}}-{{product}}_almost_ready_for_release',
@@ -533,9 +531,11 @@ BUILDER_NAMES = [
     'linux64-br-haz_{{branch}}_dep',
     'release-{{branch}}_{{product}}_{{platform}}_update_verify',
     'release-{{branch}}_{{product}}_bncr_sub',
+    'release-{{branch}}-{{product}}_bncr_sub',
     'release-{{branch}}-{{product}}_bouncer_aliases',
     'release-{{branch}}-{{product}}_chcksms',
     'release-{{branch}}-{{product}}_publish_balrog',
+    'release-{{branch}}-{{product}}_mark_as_shipped',
     'release-{{branch}}-{{product}}_updates',
     'release-{{branch}}-{{product}}_version_bump',
     'release-{{branch}}-{{product}}_uptake_monitoring',
@@ -553,7 +553,8 @@ BUILD_TYPES = [
     "l10n",   # INTERNATIONALIZATION
     "leak test",
     "static analysis",
-    "ubsan",   #
+    "ccov",   # C/C++ CODE COVERAGE
+    "ubsan",  #
     "jsdcov"  # JAVASCRIPT CODE COVERAGE
 
 ]
@@ -594,21 +595,28 @@ TEST_PLATFORMS = {
     "Rev5 MacOSX Yosemite 10.10": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
     "Rev5 MacOSX Yosemite 10.10.5": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
     "Rev7 MacOSX Yosemite 10.10.5": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
+    "Rev7 MacOSX Yosemite 10.10.5 DevEdition": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64", "type": ["devedition"]}},
     "Ubuntu ASAN VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["asan"]}},
     "Ubuntu ASAN VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["asan"]}},
     "Ubuntu TSAN VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["tsan"]}},
     "Ubuntu TSAN VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["tsan"]}},
     "Ubuntu HW 12.04": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux32"}},
     "Ubuntu HW 12.04 x64": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64"}},
+    "Ubuntu HW 12.04 x64 stylo": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo"]}},
+    "Ubuntu HW 12.04 x64 stylo-sequential": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo", "sequential"]}},
     "Ubuntu VM 12.04": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux32"}},
     "Ubuntu VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "Ubuntu VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "Ubuntu VM 12.04 x64 Mulet": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["mulet"]}},
     "Windows XP 32-bit": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "Windows 7 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
+    "Windows 7 32-bit DevEdition": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32", "type": ["devedition"]}},
     "Windows 7 VM 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
-    "Windows 7 VM-GFX 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
+    "Windows 7 VM 32-bit DevEdition": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32", "type": ["devedition"]}},
+    "Windows 7 VM-GFX 32-bit": {"run": {"machine": {"os": "win7"}, "type": ["gfx"]}, "build": {"platform": "win32"}},
+    "Windows 7 VM-GFX 32-bit DevEdition": {"run": {"machine": {"os": "win7"}, "type": ["gfx"]}, "build": {"platform": "win32", "type": ["devedition"]}},
     "Windows 8 64-bit": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
+    "Windows 8 64-bit DevEdition": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64", "type": ["devedition"]}},
     "Windows 10 64-bit": {"run": {"machine": {"os": "win10"}}, "build": {"platform": "win64"}},
     "WINNT 5.2": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win64"}},
     "WINNT 5.2 add-on-devel": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win64", "type": ["add-on"]}},
@@ -723,6 +731,7 @@ KNOWN_PLATFORM = {
     "macosx64": {"build": {"platform": "macosx64"}},
     "macosx64-add-on-devel": {"build": {"platform": "macosx64", "type": ["add-on"]}},
     "macosx64-debug": {"build": {"platform": "macosx64", "type": ["debug"]}},
+    "macosx64-devedition":  {"build": {"platform": "macosx64", "type":["devedition"]}},
     "macosx64_gecko": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g"}},
     "macosx64_gecko-debug": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g", "type": ["debug"]}},
     "macosx64_gecko_localizer": {},
@@ -746,10 +755,13 @@ KNOWN_PLATFORM = {
     "ubuntu64_hw": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64"}},
     "ubuntu64_vm": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "ubuntu64_vm_lnx_large": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
+    "ubuntu64_hw_stylo": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo"]}},
+    "ubuntu64_hw_styloseq": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo", "sequential"]}},
     "wasabi": {"run": {"machine": {"os": "b2g"}}, "build": {"platform": "wasabi"}},
     "win32": {"build": {"platform": "win32"}},
     "win32-add-on-devel": {"build": {"platform": "win32", "type": ["add-on"]}},
     "win32-debug": {"build": {"platform": "win32", "type": ["debug"]}},
+    "win32-devedition": {"build": {"platform": "win32", "type": ["debug", "devedition"]}},
     "win32-mulet": {"build": {"platform": "win32", "type": ["mulet"]}},
     "win32_gecko": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g"}},
     "win32_gecko-debug": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g", "type": ["debug"]}},
@@ -758,18 +770,22 @@ KNOWN_PLATFORM = {
     "win64": {"build": {"platform": "win64"}},
     "win64-add-on-devel": {"build": {"platform": "win64", "type": ["add-on"]}},
     "win64-debug": {"build": {"platform": "win64", "type": ["debug"]}},
-    "win64_graphene": {"run": {"machine": {"vm": "graphene"}}, "build": {"platform": "win64"}},
+    "win64-devedition":  {"build": {"platform": "win64", "type":["devedition"]}},
+    "win64_graphene": {"run": {"machine": {"vm": "graphene"}}, "build": {"platform": "win64", "type":["devedition"]}},
     "win64_horizon": {"run": {"machine": {"vm": "horizon"}}, "build": {"platform": "win64"}},
     "win64-rev2": {"build": {"platform": "win64"}},
     "win7-ix": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
     "win7_ix": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
+    "win7_ix_devedition":  {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
     "win8": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
     "win8_64": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
+    "win8_64_devedition": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64", "type":["devedition"]}},
     "win10_64": {"run": {"machine": {"os": "win10"}}, "build": {"platform": "win64"}},
     "xp-ix": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "xp_ix": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "yosemite": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
-    "yosemite_r7": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}}
+    "yosemite_r7": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
+    "yosemite_r7_devedition": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64", "type":["devedition"]}}
 }
 
 
@@ -798,7 +814,8 @@ ALLOWED_PRODUCTS = [
     "mobile",
     "spidermonkey",
     "thunderbird",
-    "xulrunner"
+    "xulrunner",
+    "devedition"
 ]
 
 

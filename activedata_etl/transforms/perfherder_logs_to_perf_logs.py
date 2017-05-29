@@ -14,20 +14,18 @@ import datetime
 from copy import copy
 from math import sqrt
 
-import pyLibrary
+import mo_math
 from activedata_etl.transforms import TRY_AGAIN_LATER
-from pyLibrary import convert
-from pyLibrary.collections import MIN, MAX
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import literal_field, Dict, coalesce, unwrap, set_default, listwrap, unwraplist, wrap
-from pyLibrary.dot.lists import DictList
-from pyLibrary.env.git import get_git_revision
-from pyLibrary.maths import Math
-from pyLibrary.maths.stats import ZeroMoment2Stats, ZeroMoment
-from pyLibrary.queries import jx
-from pyLibrary.thread.threads import Lock
-from pyLibrary.times.dates import Date
 from activedata_etl.transforms.pulse_block_to_es import transform_buildbot
+from mo_dots import literal_field, Data, FlatList, coalesce, unwrap, set_default, listwrap, unwraplist, wrap
+from mo_logs import Log
+from mo_math import MIN, MAX, Math
+from mo_math.stats import ZeroMoment2Stats, ZeroMoment
+from mo_threads import Lock
+from mo_times.dates import Date
+from pyLibrary import convert
+from pyLibrary.env.git import get_git_revision
+from pyLibrary.queries import jx
 
 DEBUG = True
 ARRAY_TOO_BIG = 1000
@@ -39,6 +37,9 @@ KNOWN_PERFHERDER_PROPERTIES = {"_id", "etl", "extraOptions", "framework", "is_em
 KNOWN_PERFHERDER_TESTS = [
     "a11yr",
     "basic_compositor_video",
+    "bloom_basic_ref",
+    "bloom_basic",
+    "compiler warnings",
     "build times",
     "cart",
     "chromez",
@@ -53,6 +54,7 @@ KNOWN_PERFHERDER_TESTS = [
     "g3",
     "g4",
     "glterrain",
+    "glvideo",
     "installer size",
     "jittest.jittest.overall",
     "kraken",
@@ -61,8 +63,13 @@ KNOWN_PERFHERDER_TESTS = [
     "other_nol64",
     "other_l64",
     "other",
+    "sccache cache_write_errors",
+    "sccache hit rate",
+    "sccache requests_not_cacheable",
     "sessionrestore_no_auto_restore",
     "sessionrestore",
+    "Strings",
+    "Stylo",
     "svgr",
     "tabpaint",
     "tart",
@@ -74,14 +81,17 @@ KNOWN_PERFHERDER_TESTS = [
     "tp4m",
     "tp5n",
     "tp5o_scroll",
+    "tp5o_webext",
     "tp5o",
     "tpaint",
     "tps",
     "tresize",
     "trobocheck2",
+    "ts_paint_webext",
     "ts_paint",
     "tscrollx",
     "tsvgr_opacity",
+    "tsvg_static",
     "tsvgx",
     "v8_7",
     "xperf"
@@ -124,7 +134,7 @@ def process(source_key, source, destination, resources, please_stop=None):
                 key = source_key + "." + unicode(i)
                 records.append({"id": key, "value": p})
                 i += 1
-        except Exception, e:
+        except Exception as e:
             if TRY_AGAIN_LATER:
                 Log.error("Did not finish processing {{key}}", key=source_key, cause=e)
 
@@ -133,14 +143,18 @@ def process(source_key, source, destination, resources, please_stop=None):
     if not records:
         Log.warning("No perfherder records are found in {{key}}", key=source_key)
 
-    destination.extend(records)
-    return [source_key]
+    try:
+        destination.extend(records)
+        return [source_key]
+    except Exception as e:
+        Log.error("Could not add {{num}} documents when processing key {{key}}", key=source_key, num=len(records), cause=e)
 
 
 # CONVERT THE TESTS (WHICH ARE IN A dict) TO MANY RECORDS WITH ONE result EACH
 def transform(source_key, perfherder, resources):
     try:
         buildbot = transform_buildbot(source_key, perfherder.pulse, resources)
+        buildbot.repo.changeset.files = None
         suite_name = coalesce(perfherder.testrun.suite, perfherder.name, buildbot.run.suite)
         if not suite_name:
             if perfherder.is_empty:
@@ -163,14 +177,14 @@ def transform(source_key, perfherder, resources):
                         option=option
                     )
                 suite_name = suite_name.replace("-" + option, "")
-        buildbot.run.type += listwrap(perfherder.extraOptions)
+        buildbot.run.type = list(set(buildbot.run.type + listwrap(perfherder.extraOptions)))
 
         # RECOGNIZE SUITE
         for s in KNOWN_PERFHERDER_TESTS:
             if suite_name == s:
                 break
             elif suite_name.startswith(s):
-                Log.warning("removing suite suffix of {{suffix|quote}}", suffix=suite_name[len(s)::])
+                Log.warning("removing suite suffix of {{suffix|quote}} for {{suite}}", suffix=suite_name[len(s)::], suite=suite_name)
                 suite_name = s
                 break
             elif suite_name.startswith("remote-" + s):
@@ -195,7 +209,7 @@ def transform(source_key, perfherder, resources):
         mainthread_transform(perfherder.results_aux)
         mainthread_transform(perfherder.results_xperf)
 
-        new_records = DictList()
+        new_records = FlatList()
 
         # RECORD THE UNKNOWN PART OF THE TEST RESULTS
         if perfherder.keys() - KNOWN_PERFHERDER_PROPERTIES:
@@ -205,7 +219,7 @@ def transform(source_key, perfherder, resources):
             if any(remainder.values()):
                 new_records.append(set_default(remainder, buildbot))
 
-        total = DictList()
+        total = FlatList()
 
         if perfherder.subtests:
             if suite_name in ["dromaeo_css", "dromaeo_dom"]:
@@ -312,7 +326,7 @@ def transform(source_key, perfherder, resources):
             num=len(new_records)
         )
         return new_records
-    except Exception, e:
+    except Exception as e:
         Log.error("Transformation failure on id={{uid}}", {"uid": source_key}, e)
 
 
@@ -320,7 +334,7 @@ def mainthread_transform(r):
     if r == None:
         return None
 
-    output = Dict()
+    output = Data()
 
     for i in r.mainthread_readbytes:
         output[literal_field(i[1])].name = i[1]
@@ -361,14 +375,14 @@ def stats(source_key, given_values, test, suite):
         clean_values = wrap([float(v) for v in given_values if not Math.is_nan(v) and Math.is_finite(v)])
 
         z = ZeroMoment.new_instance(clean_values)
-        s = Dict()
+        s = Data()
         for k, v in z.dict.items():
             s[k] = v
         for k, v in ZeroMoment2Stats(z).items():
             s[k] = v
         s.max = MAX(clean_values)
         s.min = MIN(clean_values)
-        s.median = pyLibrary.maths.stats.median(clean_values, simple=False)
+        s.median = mo_math.stats.median(clean_values, simple=False)
         s.last = clean_values.last()
         s.first = clean_values[0]
         if Math.is_number(s.variance) and not Math.is_nan(s.variance):
@@ -388,7 +402,7 @@ def stats(source_key, given_values, test, suite):
             "samples": clean_values,
             "rejects": rejects
         }
-    except Exception, e:
+    except Exception as e:
         Log.warning("can not reduce series to moments", e)
         return {}
 
@@ -397,7 +411,7 @@ def geo_mean(values):
     """
     GIVEN AN ARRAY OF dicts, CALC THE GEO-MEAN ON EACH ATTRIBUTE
     """
-    agg = Dict()
+    agg = Data()
     for d in values:
         for k, v in d.items():
             if v != 0:
