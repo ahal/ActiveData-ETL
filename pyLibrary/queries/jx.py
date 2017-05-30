@@ -16,26 +16,24 @@ import __builtin__
 from collections import Mapping
 from types import GeneratorType
 
-import itertools
-
-from pyLibrary import dot, convert
-from pyLibrary.collections import UNION, MIN
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import listwrap, wrap, unwrap
-from pyLibrary.dot import set_default, Null, Dict, split_field, coalesce, join_field
-from pyLibrary.dot.lists import DictList
-from pyLibrary.dot.objects import DictObject
-from pyLibrary.maths import Math
+import mo_dots
+from mo_dots import listwrap, wrap, unwrap, FlatList
+from mo_dots import set_default, Null, Data, split_field, coalesce, join_field
+from mo_dots.objects import DataObject
+from mo_logs import Log
+from mo_math import Math
+from mo_math import UNION, MIN
+from pyLibrary import convert
+from mo_collections.index import Index
+from mo_collections.unique_index import UniqueIndex
 from pyLibrary.queries import flat_list, query, group_by
 from pyLibrary.queries.containers import Container
 from pyLibrary.queries.containers.cube import Cube
 from pyLibrary.queries.cubes.aggs import cube_aggs
 from pyLibrary.queries.expression_compiler import compile_expression
 from pyLibrary.queries.expressions import TRUE_FILTER, FALSE_FILTER, jx_expression_to_function
-from pyLibrary.queries.flat_list import FlatList
-from pyLibrary.queries.index import Index
-from pyLibrary.queries.query import QueryOp, _normalize_selects, sort_direction
-from pyLibrary.queries.unique_index import UniqueIndex
+from pyLibrary.queries.flat_list import PartFlatList
+from pyLibrary.queries.query import QueryOp, _normalize_selects
 
 # A COLLECTION OF DATABASE OPERATORS (RELATIONAL ALGEBRA OPERATORS)
 # JSON QUERY EXPRESSION DOCUMENTATION: https://github.com/klahnakoski/jx/tree/master/docs
@@ -54,28 +52,32 @@ def get(expr):
     return jx_expression_to_function(expr)
 
 
-def run(query, frum=None):
+def run(query, frum=Null):
     """
     THIS FUNCTION IS SIMPLY SWITCHING BASED ON THE query["from"] CONTAINER,
     BUT IT IS ALSO PROCESSING A list CONTAINER; SEPARATE TO A ListContainer
     """
-    query = QueryOp.wrap(query, frum.schema)
-    frum = coalesce(frum, query["from"])
+    if frum == None:
+        query_op = QueryOp.wrap(query)
+        frum = query_op.frum
+    else:
+        query_op = QueryOp.wrap(query, frum.schema)
+
     if isinstance(frum, Container):
-        return frum.query(query)
+        return frum.query(query_op)
     elif isinstance(frum, (list, set, GeneratorType)):
         frum = wrap(list(frum))
     elif isinstance(frum, Cube):
-        if is_aggs(query):
-            return cube_aggs(frum, query)
+        if is_aggs(query_op):
+            return cube_aggs(frum, query_op)
 
     elif isinstance(frum, QueryOp):
         frum = run(frum)
     else:
-        Log.error("Do not know how to handle {{type}}",  type=frum.__class__.__name__)
+        Log.error("Do not know how to handle {{type}}", type=frum.__class__.__name__)
 
-    if is_aggs(query):
-        frum = list_aggs(frum, query)
+    if is_aggs(query_op):
+        frum = list_aggs(frum, query_op)
     else:  # SETOP
         # try:
         #     if query.filter != None or query.esfilter != None:
@@ -83,26 +85,26 @@ def run(query, frum=None):
         # except AttributeError:
         #     pass
 
-        if query.where is not TRUE_FILTER:
-            frum = filter(frum, query.where)
+        if query_op.where is not TRUE_FILTER:
+            frum = filter(frum, query_op.where)
 
-        if query.sort:
-            frum = sort(frum, query.sort, already_normalized=True)
+        if query_op.sort:
+            frum = sort(frum, query_op.sort, already_normalized=True)
 
-        if query.select:
-            frum = select(frum, query.select)
+        if query_op.select:
+            frum = select(frum, query_op.select)
 
-    if query.window:
+    if query_op.window:
         if isinstance(frum, Cube):
             frum = list(frum.values())
 
-        for param in query.window:
+        for param in query_op.window:
             window(frum, param)
 
     # AT THIS POINT frum IS IN LIST FORMAT, NOW PACKAGE RESULT
-    if query.format == "cube":
+    if query_op.format == "cube":
         frum = convert.list2cube(frum)
-    elif query.format == "table":
+    elif query_op.format == "table":
         frum = convert.list2table(frum)
         frum.meta.format = "table"
     else:
@@ -125,7 +127,7 @@ def index(data, keys=None):
         if data.edges[0].name==keys[0]:
             #QUICK PATH
             names = list(data.data.keys())
-            for d in (set_default(dot.zip(names, r), {keys[0]: p}) for r, p in zip(zip(*data.data.values()), data.edges[0].domain.partitions.value)):
+            for d in (set_default(mo_dots.zip(names, r), {keys[0]: p}) for r, p in zip(zip(*data.data.values()), data.edges[0].domain.partitions.value)):
                 o.add(d)
             return o
         else:
@@ -146,7 +148,7 @@ def unique_index(data, keys=None, fail_on_dup=True):
     for d in data:
         try:
             o.add(d)
-        except Exception, e:
+        except Exception as e:
             o.add(d)
             Log.error("index {{index}} is not unique {{key}} maps to both {{value1}} and {{value2}}",
                 index= keys,
@@ -166,8 +168,8 @@ def map2set(data, relation):
     """
     if data == None:
         return Null
-    if isinstance(relation, Dict):
-        Log.error("Does not accept a Dict")
+    if isinstance(relation, Data):
+        Log.error("Does not accept a Data")
 
     if isinstance(relation, Mapping):
         try:
@@ -178,7 +180,7 @@ def map2set(data, relation):
                 for cod in relation.get(d, []):
                     output.add(cod)
             return output
-        except Exception, e:
+        except Exception as e:
             Log.error("Expecting a dict with lists in codomain", e)
     else:
         try:
@@ -191,7 +193,7 @@ def map2set(data, relation):
                     continue
                 output.add(cod)
             return output
-        except Exception, e:
+        except Exception as e:
             Log.error("Expecting a dict with lists in codomain", e)
     return Null
 
@@ -221,19 +223,19 @@ def tuple(data, field_name):
             return output
     elif isinstance(field_name, list):
         paths = [_select_a_field(f) for f in field_name]
-        output = DictList()
+        output = FlatList()
         _tuple((), unwrap(data), paths, 0, output)
         return output
     else:
         paths = [_select_a_field(field_name)]
-        output = DictList()
+        output = FlatList()
         _tuple((), data, paths, 0, output)
         return output
 
 
 def _tuple(template, data, fields, depth, output):
     deep_path = None
-    deep_fields = DictList()
+    deep_fields = FlatList()
     for d in data:
         record = template
         for f in fields:
@@ -275,11 +277,11 @@ def select(data, field_name):
     if isinstance(data, Cube):
         return data._select(_normalize_selects(field_name))
 
-    if isinstance(data, FlatList):
+    if isinstance(data, PartFlatList):
         return data.select(field_name)
 
     if isinstance(data, UniqueIndex):
-        data = data._data.values()  # THE SELECT ROUTINE REQUIRES dicts, NOT Dict WHILE ITERATING
+        data = data._data.values()  # THE SELECT ROUTINE REQUIRES dicts, NOT Data WHILE ITERATING
 
     if isinstance(data, Mapping):
         return select_one(data, field_name)
@@ -297,17 +299,17 @@ def select(data, field_name):
     if isinstance(field_name, basestring):
         path = split_field(field_name)
         if len(path) == 1:
-            return DictList([d[field_name] for d in data])
+            return FlatList([d[field_name] for d in data])
         else:
-            output = DictList()
+            output = FlatList()
             flat_list._select1(data, path, 0, output)
             return output
     elif isinstance(field_name, list):
         keys = [_select_a_field(wrap(f)) for f in field_name]
-        return _select(Dict(), unwrap(data), keys, 0)
+        return _select(Data(), unwrap(data), keys, 0)
     else:
         keys = [_select_a_field(field_name)]
-        return _select(Dict(), unwrap(data), keys, 0)
+        return _select(Data(), unwrap(data), keys, 0)
 
 
 def _select_a_field(field):
@@ -321,12 +323,12 @@ def _select_a_field(field):
 
 
 def _select(template, data, fields, depth):
-    output = DictList()
+    output = FlatList()
     deep_path = []
     deep_fields = UniqueIndex(["name"])
     for d in data:
-        if isinstance(d, Dict):
-            Log.error("programmer error, _select can not handle Dict")
+        if isinstance(d, Data):
+            Log.error("programmer error, _select can not handle Data")
 
         record = template.copy()
         children = None
@@ -337,7 +339,7 @@ def _select(template, data, fields, depth):
                 path = f.value[0:index:]
                 if not deep_fields[f]:
                     deep_fields.add(f)  # KEEP TRACK OF WHICH FIELDS NEED DEEPER SELECT
-                short = MIN(len(deep_path), len(path))
+                short = MIN([len(deep_path), len(path)])
                 if path[:short:] != deep_path[:short:]:
                     Log.error("Dangerous to select into more than one branch at time")
                 if len(deep_path) < len(path):
@@ -358,7 +360,7 @@ def _select_deep(v, field, depth, record):
     if hasattr(field.value, '__call__'):
         try:
             record[field.name] = field.value(wrap(v))
-        except Exception, e:
+        except Exception as e:
             record[field.name] = None
         return 0, None
 
@@ -375,7 +377,7 @@ def _select_deep(v, field, depth, record):
             record[field.name] = v
         else:
             record[field.name] = v.get(f)
-    except Exception, e:
+    except Exception as e:
         Log.error("{{value}} does not have {{field}} property",  value= v, field=f, cause=e)
     return 0, None
 
@@ -393,7 +395,7 @@ def _select_deep_meta(field, depth):
                 destination[name] = field.value(wrap(source))
                 return 0, None
             return assign
-        except Exception, e:
+        except Exception as e:
             def assign(source, destination):
                 destination[name] = None
                 return 0, None
@@ -415,7 +417,7 @@ def _select_deep_meta(field, depth):
                     destination[name] = source
                 else:
                     destination[name] = source.get(f)
-            except Exception, e:
+            except Exception as e:
                 Log.error("{{value}} does not have {{field}} property",  value= source, field=f, cause=e)
             return 0, None
         return assign
@@ -430,7 +432,7 @@ def _select_deep_meta(field, depth):
             def assign(source, destination):
                 try:
                     destination[name] = source.get(f)
-                except Exception, e:
+                except Exception as e:
                     Log.error("{{value}} does not have {{field}} property",  value= source, field=f, cause=e)
                 return 0, None
             return assign
@@ -454,10 +456,10 @@ type_to_name = {
     unicode: "string",
     float: "double",
     Number: "double",
-    Dict: "object",
+    Data: "object",
     dict: "object",
     list: "nested",
-    DictList: "nested"
+    FlatList: "nested"
 }
 
 def _deep_iterator(data, schema):
@@ -532,20 +534,20 @@ def sort(data, fieldnames=None, already_normalized=False):
                     result = value_compare(func(left), func(right), sort_)
                     if result != 0:
                         return result
-                except Exception, e:
+                except Exception as e:
                     Log.error("problem with compare", e)
             return 0
 
         if isinstance(data, list):
-            output = DictList([unwrap(d) for d in sorted(data, cmp=comparer)])
+            output = FlatList([unwrap(d) for d in sorted(data, cmp=comparer)])
         elif hasattr(data, "__iter__"):
-            output = DictList([unwrap(d) for d in sorted(list(data), cmp=comparer)])
+            output = FlatList([unwrap(d) for d in sorted(list(data), cmp=comparer)])
         else:
             Log.error("Do not know how to handle")
             output = None
 
         return output
-    except Exception, e:
+    except Exception as e:
         Log.error("Problem sorting\n{{data}}",  data=data, cause=e)
 
 
@@ -627,7 +629,7 @@ def filter(data, where):
     if isinstance(data, (list, set)):
         temp = jx_expression_to_function(where)
         dd = wrap(data)
-        return [d for i, d in enumerate(data) if temp(wrap(d), i, dd)]
+        return wrap([unwrap(d) for i, d in enumerate(data) if temp(wrap(d), i, dd)])
     else:
         Log.error("Do not know how to handle type {{type}}", type=data.__class__.__name__)
 
@@ -635,7 +637,7 @@ def filter(data, where):
         return drill_filter(where, data)
     except Exception, _:
         # WOW!  THIS IS INEFFICIENT!
-        return wrap([unwrap(d) for d in drill_filter(where, [DictObject(d) for d in data])])
+        return wrap([unwrap(d) for d in drill_filter(where, [DataObject(d) for d in data])])
 
 
 def drill_filter(esfilter, data):
@@ -658,7 +660,7 @@ def drill_filter(esfilter, data):
         for i, c in enumerate(col):
             try:
                 d = d[c]
-            except Exception, e:
+            except Exception as e:
                 Log.error("{{name}} does not exist", name=fieldname)
             if isinstance(d, list) and len(col) > 1:
                 if len(primary_column) <= depth+i:
@@ -693,7 +695,7 @@ def drill_filter(esfilter, data):
 
         if filter["and"]:
             result = True
-            output = DictList()
+            output = FlatList()
             for a in filter[u"and"]:
                 f = pe_filter(a, data, depth)
                 if f is False:
@@ -705,7 +707,7 @@ def drill_filter(esfilter, data):
             else:
                 return result
         elif filter["or"]:
-            output = DictList()
+            output = FlatList()
             for o in filter[u"or"]:
                 f = pe_filter(o, data, depth)
                 if f is True:
@@ -883,7 +885,7 @@ def drill_filter(esfilter, data):
 
     # OUTPUT IS A LIST OF ROWS,
     # WHERE EACH ROW IS A LIST OF VALUES SEEN DURING A WALK DOWN A PATH IN THE HIERARCHY
-    uniform_output = DictList()
+    uniform_output = FlatList()
     def recurse(row, depth):
         if depth == max:
             uniform_output.append(row)
@@ -907,7 +909,7 @@ def drill_filter(esfilter, data):
         # SIMPLE LIST AS RESULT
         return wrap([unwrap(u[0]) for u in uniform_output])
 
-    return FlatList(primary_column[0:max], uniform_output)
+    return PartFlatList(primary_column[0:max], uniform_output)
 
 
 def wrap_function(func):
@@ -946,7 +948,7 @@ def window(data, param):
     edges = param.edges          # columns to gourp by
     where = param.where          # DO NOT CONSIDER THESE VALUES
     sortColumns = param.sort     # columns to sort by
-    calc_value = wrap_function(jx_expression_to_function(param.value))  # function that takes a record and returns a value (for aggregation)
+    calc_value = jx_expression_to_function(param.value)  # function that takes a record and returns a value (for aggregation)
     aggregate = param.aggregate  # WindowFunction to apply
     _range = param.range         # of form {"min":-10, "max":0} to specify the size and relative position of window
 
@@ -960,18 +962,26 @@ def window(data, param):
             r[name] = calc_value(r, rownum, data)
         return
 
+    try:
+        edge_values = [e.value.var for e in edges]
+    except Exception as e:
+        raise Log.error("can only support simple variable edges", cause=e)
+
     if not aggregate or aggregate == "none":
-        for _, values in groupby(data, edges.value):
+        for _, values in groupby(data, edge_values):
             if not values:
                 continue     # CAN DO NOTHING WITH THIS ZERO-SAMPLE
 
-            sequence = sort(values, sortColumns, already_normalized=True)
+            if sortColumns:
+                sequence = sort(values, sortColumns, already_normalized=True)
+            else:
+                sequence = values
 
             for rownum, r in enumerate(sequence):
                 r[name] = calc_value(r, rownum, sequence)
         return
 
-    for keys, values in groupby(data, edges.value):
+    for keys, values in groupby(data, edge_values):
         if not values:
             continue     # CAN DO NOTHING WITH THIS ZERO-SAMPLE
 

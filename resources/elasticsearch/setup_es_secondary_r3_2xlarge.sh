@@ -14,8 +14,6 @@
 # }
 
 
-sudo ifconfig eth0 mtu 1500
-
 # NOTE: NODE DISCOVERY WILL ONLY WORK IF PORT 9300 IS OPEN BETWEEN THEM
 
 # ORACLE'S JAVA VERISON 8 IS APPARENTLY MUCH FASTER
@@ -23,8 +21,8 @@ sudo ifconfig eth0 mtu 1500
 cd /home/ec2-user/
 mkdir temp
 cd temp
-wget -c --no-cookies --no-check-certificate --header "Cookie: s_cc=true; s_nr=1425654197863; s_sq=%5B%5BB%5D%5D; oraclelicense=accept-securebackup-cookie; gpw_e24=http%3A%2F%2Fwww.oracle.com%2Ftechnetwork%2Fjava%2Fjavase%2Fdownloads%2Fjre8-downloads-2133155.html" "http://download.oracle.com/otn-pub/java/jdk/8u40-b25/jre-8u40-linux-x64.rpm" --output-document="jdk-8u5-linux-x64.rpm"
-sudo rpm -i jdk-8u5-linux-x64.rpm
+# UPLOAD jre-8u131-linux-x64.rpm FROM ./resources/binaries
+sudo rpm -i jre-8u131-linux-x64.rpm
 sudo alternatives --install /usr/bin/java java /usr/java/default/bin/java 20000
 export JAVA_HOME=/usr/java/default
 
@@ -67,11 +65,11 @@ sudo bin/plugin install mobz/elasticsearch-head
 #/dev/xvdb: data
 
 #FORMAT AND MOUNT
+sudo mkfs -t ext4 /dev/xvdb
 sudo mkfs -t ext4 /dev/xvdc
 sudo mkfs -t ext4 /dev/xvdd
 sudo mkfs -t ext4 /dev/xvde
 sudo mkfs -t ext4 /dev/xvdf
-sudo mkfs -t ext4 /dev/xvdg
 
 #MOUNT (NO FORMAT)
 #sudo mount /dev/xvdb /data1
@@ -85,11 +83,11 @@ sudo mkdir /data4
 sudo mkdir /data5
 
 # ADD TO /etc/fstab SO AROUND AFTER REBOOT
-sudo sed -i '$ a\/dev/xvdc   /data1       ext4    defaults,nofail  0   2' /etc/fstab
-sudo sed -i '$ a\/dev/xvdd   /data2       ext4    defaults,nofail  0   2' /etc/fstab
-sudo sed -i '$ a\/dev/xvde   /data3       ext4    defaults,nofail  0   2' /etc/fstab
-sudo sed -i '$ a\/dev/xvdf   /data4       ext4    defaults,nofail  0   2' /etc/fstab
-sudo sed -i '$ a\/dev/xvdg   /data5       ext4    defaults,nofail  0   2' /etc/fstab
+sudo sed -i '$ a\/dev/xvdb   /data1       ext4    defaults,nofail  0   2' /etc/fstab
+sudo sed -i '$ a\/dev/xvdc   /data2       ext4    defaults,nofail  0   2' /etc/fstab
+sudo sed -i '$ a\/dev/xvdd   /data3       ext4    defaults,nofail  0   2' /etc/fstab
+sudo sed -i '$ a\/dev/xvde   /data4       ext4    defaults,nofail  0   2' /etc/fstab
+sudo sed -i '$ a\/dev/xvdf   /data5       ext4    defaults,nofail  0   2' /etc/fstab
 
 # TEST IT IS WORKING
 sudo mount -a
@@ -122,7 +120,7 @@ cd ~/ActiveData-ETL
 git checkout primary
 
 # COPY CONFIG FILE TO ES DIR
-sudo cp ~/ActiveData-ETL/resources/elasticsearch/elasticsearch_secondary.yml /usr/local/elasticsearch/config/elasticsearch.yml
+sudo cp ~/ActiveData-ETL/resources/elasticsearch/elasticsearch_2.yml /usr/local/elasticsearch/config/elasticsearch.yml
 
 # FOR SOME REASON THE export COMMAND DOES NOT SEEM TO WORK
 # THIS SCRIPT SETS THE ES_MIN_MEM/ES_MAX_MEM EXPLICITLY

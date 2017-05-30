@@ -12,44 +12,73 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import unicode_literals
 
-import itertools
 import math
 import sys
 
-from pyLibrary.collections.multiset import Multiset
-from pyLibrary.debugs.exceptions import Except
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import wrap, listwrap
-from pyLibrary.dot.lists import DictList
+from mo_collections.multiset import Multiset
+from mo_logs.exceptions import Except
+from mo_logs import Log
+from mo_dots import listwrap, Null, Data
+from mo_dots.lists import FlatList
 from pyLibrary.queries.containers import Container
-from pyLibrary.queries.expressions import jx_expression_to_function
+from pyLibrary.queries.expressions import jx_expression_to_function, jx_expression, Expression, TupleOp
 
 
 def groupby(data, keys=None, size=None, min_size=None, max_size=None, contiguous=False):
     """
-        return list of (keys, values) pairs where
-            group by the set of keys
-            values IS LIST OF ALL data that has those keys
-        contiguous - MAINTAIN THE ORDER OF THE DATA, STARTING THE NEW GROUP WHEN THE SELECTOR CHANGES
+    :param data:
+    :param keys:
+    :param size:
+    :param min_size:
+    :param max_size:
+    :param contiguous: MAINTAIN THE ORDER OF THE DATA, STARTING THE NEW GROUP WHEN THE SELECTOR CHANGES
+    :return: return list of (keys, values) PAIRS, WHERE
+                 keys IS IN LEAF FORM (FOR USE WITH {"eq": terms} OPERATOR
+                 values IS GENERATOR OF ALL VALUE THAT MATCH keys
+        contiguous -
     """
+    if isinstance(data, Container):
+        return data.groupby(keys)
 
     if size != None or min_size != None or max_size != None:
         if size != None:
             max_size = size
         return groupby_min_max_size(data, min_size=min_size, max_size=max_size)
 
-    if isinstance(data, Container):
-        return data.groupby(keys)
-
     try:
         keys = listwrap(keys)
-        get_key = jx_expression_to_function(keys)
         if not contiguous:
-            data = sorted(data, key=get_key)
+            from pyLibrary.queries import jx
+            data = jx.sort(data, keys)
 
-        return ((wrap({k: v for k, v in zip(keys, g)}), wrap(v)) for g, v in itertools.groupby(data, get_key))
-    except Exception, e:
-        Log.error("Problem grouping", e)
+        if not data:
+            return Null
+
+        if any(isinstance(k, Expression) for k in keys):
+            Log.error("can not handle expressions")
+        else:
+            accessor = jx_expression_to_function(jx_expression({"tuple": keys}))  # CAN RETURN Null, WHICH DOES NOT PLAY WELL WITH __cmp__
+
+        def _output():
+            start = 0
+            prev = accessor(data[0])
+            for i, d in enumerate(data):
+                curr = accessor(d)
+                if curr != prev:
+                    group = {}
+                    for k, gg in zip(keys, prev):
+                        group[k] = gg
+                    yield Data(group), data[start:i:]
+                    start = i
+                    prev = curr
+            group = {}
+            for k, gg in zip(keys, prev):
+                group[k] = gg
+            yield Data(group), data[start::]
+
+        return _output()
+    except Exception as e:
+        Log.error("Problem grouping", cause=e)
 
 
 def groupby_size(data, size):
@@ -60,9 +89,9 @@ def groupby_size(data, size):
     else:
         Log.error("do not know how to handle this type")
 
-    done = DictList()
+    done = FlatList()
     def more():
-        output = DictList()
+        output = FlatList()
         for i in range(size):
             try:
                 output.append(iterator.next())
@@ -126,17 +155,17 @@ def groupby_min_max_size(data, min_size=0, max_size=None, ):
     elif hasattr(data, "__iter__"):
         def _iter():
             g = 0
-            out = DictList()
+            out = FlatList()
             try:
                 for i, d in enumerate(data):
                     out.append(d)
                     if (i + 1) % max_size == 0:
                         yield g, out
                         g += 1
-                        out = DictList()
+                        out = FlatList()
                 if out:
                     yield g, out
-            except Exception, e:
+            except Exception as e:
                 e = Except.wrap(e)
                 if out:
                     # AT LEAST TRY TO RETURN WHAT HAS BEEN PROCESSED SO FAR

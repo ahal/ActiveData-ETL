@@ -16,9 +16,9 @@ from tempfile import TemporaryFile
 import zipfile
 import zlib
 
-from pyLibrary.debugs.exceptions import suppress_exception
-from pyLibrary.debugs.logs import Log
-from pyLibrary.maths import Math
+from mo_logs.exceptions import suppress_exception
+from mo_logs import Log
+from mo_math import Math
 
 # LIBRARY TO DEAL WITH BIG DATA ARRAYS AS ITERATORS OVER (IR)REGULAR SIZED
 # BLOCKS, OR AS ITERATORS OVER LINES
@@ -62,7 +62,7 @@ class FileString(object):
             self.file.seek(i)
             output = self.file.read(j - i).decode(self.encoding)
             return output
-        except Exception, e:
+        except Exception as e:
             Log.error(
                 "Can not read file slice at {{index}}, with encoding {{encoding}}",
                 index=i,
@@ -137,7 +137,7 @@ def safe_size(source):
                 Log.note("Using file of size {{length}} instead of str()",  length= total_bytes)
 
                 return data
-            except Exception, e:
+            except Exception as e:
                 Log.error("Could not write file > {{num}} bytes",  num= total_bytes, cause=e)
         b = source.read(MIN_READ_SIZE)
 
@@ -191,7 +191,7 @@ class LazyLines(object):
                 return self._last
             else:
                 Log.error("can not index out-of-order too much")
-        except Exception, e:
+        except Exception as e:
             Log.error("Problem indexing", e)
 
 
@@ -239,7 +239,7 @@ class CompressedLines(LazyLines):
                 return self._last
             else:
                 Log.error("can not index out-of-order too much")
-        except Exception, e:
+        except Exception as e:
             Log.error("Problem indexing", e)
 
 
@@ -266,11 +266,11 @@ def compressed_bytes2ibytes(compressed, size):
         try:
             block = compressed[i: i + size]
             yield decompressor.decompress(block)
-        except Exception, e:
+        except Exception as e:
             Log.error("Not expected", e)
 
 
-def ibytes2ilines(generator, encoding="utf8", closer=None):
+def ibytes2ilines(generator, encoding="utf8", flexible=False, closer=None):
     """
     CONVERT A GENERATOR OF (ARBITRARY-SIZED) byte BLOCKS
     TO A LINE (CR-DELIMITED) GENERATOR
@@ -280,7 +280,7 @@ def ibytes2ilines(generator, encoding="utf8", closer=None):
     :param closer: OPTIONAL FUNCTION TO RUN WHEN DONE ITERATING
     :return:
     """
-    decode = get_decoder(encoding)
+    decode = get_decoder(encoding=encoding, flexible=flexible)
     _buffer = generator.next()
     s = 0
     e = _buffer.find(b"\n")
@@ -346,7 +346,10 @@ def icompressed2ibytes(source):
     last_bytes_count = 0  # Track the last byte count, so we do not show too many debug lines
     bytes_count = 0
     for bytes_ in source:
-        data = decompressor.decompress(bytes_)
+        try:
+            data = decompressor.decompress(bytes_)
+        except Exception as e:
+            Log.error("problem", cause=e)
         bytes_count += len(data)
         if Math.floor(last_bytes_count, 1000000) != Math.floor(bytes_count, 1000000):
             last_bytes_count = bytes_count
@@ -367,7 +370,7 @@ def scompressed2ibytes(stream):
                 if not bytes_:
                     return
                 yield bytes_
-        except Exception, e:
+        except Exception as e:
             Log.error("Problem iterating through stream", cause=e)
         finally:
             with suppress_exception:
@@ -388,7 +391,7 @@ def sbytes2ilines(stream, encoding="utf8", closer=None):
                 if not bytes_:
                     return
                 yield bytes_
-        except Exception, e:
+        except Exception as e:
             Log.error("Problem iterating through stream", cause=e)
         finally:
             try:
@@ -405,17 +408,22 @@ def sbytes2ilines(stream, encoding="utf8", closer=None):
     return ibytes2ilines(read(), encoding=encoding)
 
 
-def get_decoder(encoding):
+def get_decoder(encoding, flexible=False):
     """
     RETURN FUNCTION TO PERFORM DECODE
-    :param encoding:
-    :return:
+    :param encoding: STRING OF THE ENCODING
+    :param flexible: True IF YOU WISH TO TRY OUR BEST, AND KEEP GOING
+    :return: FUNCTION
     """
     if encoding == None:
         def no_decode(v):
             return v
         return no_decode
+    elif flexible:
+        def do_decode1(v):
+            return v.decode(encoding, 'ignore')
+        return do_decode1
     else:
-        def do_decode(v):
+        def do_decode2(v):
             return v.decode(encoding)
-        return do_decode
+        return do_decode2

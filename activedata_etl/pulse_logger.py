@@ -10,21 +10,21 @@ from __future__ import division
 from __future__ import unicode_literals
 
 from activedata_etl.synchro import SynchState, SYNCHRONIZATION_KEY
+from mo_dots import set_default, coalesce, listwrap
 from pyLibrary import aws
 from pyLibrary import convert
 from pyLibrary.collections import MAX, MIN
 from pyLibrary.collections.persistent_queue import PersistentQueue
-from pyLibrary.debugs import startup, constants
-from pyLibrary.debugs.exceptions import Except
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import set_default, coalesce, listwrap
+from mo_logs import startup, constants
+from mo_logs.exceptions import Except
+from mo_logs import Log
 from pyLibrary.env import pulse
 from pyLibrary.queries import jx
-from pyLibrary.thread.threads import Thread
-from pyLibrary.times.dates import Date
+from mo_threads import Thread
+from mo_times.dates import Date
 
 
-# ONLY DEPLOY OFF THE pulse-logger branch
+# ONLY DEPLOY OFF THE pulse-logger BRANCH
 
 
 def log_loop(settings, synch, queue, bucket, please_stop):
@@ -45,7 +45,7 @@ def log_loop(settings, synch, queue, bucket, please_stop):
             if settings.destination.key_prefix:
                 full_key = settings.destination.key_prefix + "." + unicode(synch.next_key) + ":" + unicode(MIN(g.get("_meta.count")))
             else:
-                full_key = unicode(synch.next_key) + ":" + unicode(MIN(g.select("_meta.count")))
+                full_key = unicode(synch.next_key) + ":" + unicode(MIN(g.get("_meta.count")))
             try:
                 output = [
                     set_default(
@@ -94,17 +94,19 @@ def log_loop(settings, synch, queue, bucket, please_stop):
                     bucket=bucket.name,
                     key=full_key
                 )
-            except Exception, e:
+            except Exception as e:
                 queue.rollback()
                 if not queue.closed:
                     Log.warning("Problem writing {{key}} to S3", key=full_key, cause=e)
 
             if please_stop:
                 break
+    except Exception as e:
+        Log.warning("Problem in the log loop", cause=e)
     finally:
         if work_queue != None:
             work_queue.close()
-    Log.note("log_loop() completed on it's own")
+    Log.note("log_loop() IS DONE")
 
 
 def main():
@@ -132,7 +134,7 @@ def main():
                     synch.source_key = last_item._meta.count + 1
 
                 context = [
-                    pulse.Consumer(settings=s, target=None, target_queue=queue, start=synch.source_key)
+                    pulse.Consumer(kwargs=s, target=None, target_queue=queue, start=synch.source_key)
                     for s in settings.source
                 ]
 
@@ -145,7 +147,7 @@ def main():
                 Log.note("write shutdown state to S3")
                 synch.shutdown()
 
-    except Exception, e:
+    except Exception as e:
         Log.error("Problem with etl", e)
     finally:
         Log.stop()
@@ -160,7 +162,7 @@ class ExitStack(object):
         for i, c in enumerate(self.context):
             try:
                 c.__enter__()
-            except Exception, e:
+            except Exception as e:
                 e = Except.wrap(e)
                 for ii in range(i):
                     try:
@@ -175,8 +177,6 @@ class ExitStack(object):
                 c.__exit__(exc_type, exc_val, exc_tb)
             except Exception:
                 pass
-
-
 
 
 if __name__ == "__main__":

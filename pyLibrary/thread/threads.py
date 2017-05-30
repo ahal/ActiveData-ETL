@@ -19,7 +19,6 @@ import sys
 import thread
 import threading
 import time
-
 import types
 from collections import deque
 from copy import copy
@@ -29,15 +28,19 @@ from pyLibrary import strings
 from pyLibrary.debugs.exceptions import Except, suppress_exception
 from pyLibrary.debugs.profiles import CProfiler
 from pyLibrary.dot import coalesce, Dict, unwraplist, Null
-from pyLibrary.maths import Math
 from pyLibrary.times.dates import Date
 from pyLibrary.times.durations import SECOND, Duration
 
 _Log = None
 _Except = None
-DEBUG = True
+DEBUG = False
+DEBUG_SIGNAL = False
+
 MAX_DATETIME = datetime(2286, 11, 20, 17, 46, 39)
-DEFAULT_WAIT_TIME = timedelta(minutes=5)
+DEFAULT_WAIT_TIME = timedelta(minutes=10)
+
+datetime.strptime('2012-01-01', '%Y-%m-%d')  # http://bugs.python.org/issue7980
+
 
 def _late_import():
     global _Log
@@ -120,9 +123,8 @@ class Queue(object):
                     yield value
             except Exception, e:
                 _Log.warning("Tell me about what happened here", e)
-
-        _Log.note("queue iterator is done")
-
+        if DEBUG:
+            _Log.note("queue iterator is done")
 
     def add(self, value, timeout=None):
         if not self.keep_running and not self.allow_add_after_close:
@@ -154,6 +156,7 @@ class Queue(object):
     def pop_message(self, wait=SECOND, till=None):
         """
         RETURN TUPLE (message, payload) CALLER IS RESPONSIBLE FOR CALLING message.delete() WHEN DONE
+        DUMMY IMPLEMENTATION FOR DEBUGGING
         """
         return Null, self.pop(timeout=wait, till=till)
 
@@ -195,7 +198,7 @@ class Queue(object):
                 _Log.error(Thread.TIMEOUT)
 
             if self.silent:
-                self.lock.wait()
+                self.lock.wait(till=time_to_stop_waiting)
             else:
                 self.lock.wait(wait_time)
                 if len(self.queue) > self.max:
@@ -366,7 +369,7 @@ class MainThread(object):
 
         children = copy(self.children)
         for c in reversed(children):
-            if c.name and DEBUG:
+            if DEBUG and c.name:
                 _Log.note("Stopping thread {{name|quote}}", name=c.name)
             try:
                 c.stop()
@@ -460,7 +463,7 @@ class Thread(object):
 
     def stop(self):
         for c in copy(self.children):
-            if c.name and DEBUG:
+            if DEBUG and c.name:
                 _Log.note("Stopping thread {{name|quote}}", name=c.name)
             c.stop()
         self.please_stop.go()
@@ -491,6 +494,9 @@ class Thread(object):
                     response = self.target(*a, **k)
                     with self.synch_lock:
                         self.end_of_thread = Dict(response=response)
+                else:
+                    with self.synch_lock:
+                        self.end_of_thread = Null
             except Exception, e:
                 with self.synch_lock:
                     self.end_of_thread = Dict(exception=_Except.wrap(e))
@@ -504,14 +510,19 @@ class Thread(object):
                 try:
                     children = copy(self.children)
                     for c in children:
-                        with suppress_exception:
+                        try:
                             c.stop()
+                        except Exception, e:
+                            _Log.warning("Problem stopping thread {{thread}}", thread=c.name, cause=e)
 
                     for c in children:
-                        with suppress_exception:
+                        try:
                             c.join()
+                        except Exception, e:
+                            _Log.warning("Problem joining thread {{thread}}", thread=c.name, cause=e)
 
-                    _Log.note("thread {{name|quote}} is done", name=self.name)
+                    if DEBUG:
+                        _Log.note("thread {{name|quote}} is done", name=self.name)
                     self.stopped.go()
                     del self.target, self.args, self.kwargs
                     with ALL_LOCK:
@@ -520,6 +531,9 @@ class Thread(object):
                 except Exception, e:
                     if DEBUG:
                         _Log.warning("problem with thread {{name|quote}}", cause=e, name=self.name)
+                finally:
+                    if DEBUG:
+                        _Log.note("thread {{name|quote}} is done", name=self.name)
 
     def is_alive(self):
         return not self.stopped
@@ -543,7 +557,8 @@ class Thread(object):
                 with self.synch_lock:
                     for i in range(10):
                         if self.stopped:
-                            self.parent.remove_child(self)
+                            with suppress_exception:
+                                self.parent.remove_child(self)
                             if not self.end_of_thread.exception:
                                 return self.end_of_thread.response
                             else:
@@ -670,7 +685,7 @@ class Thread(object):
         with ALL_LOCK:
             try:
                 return ALL[id]
-            except KeyError, e:
+            except KeyError:
                 return MAIN_THREAD
 
 
@@ -719,10 +734,9 @@ class Signal(object):
             if self._go:
                 return
 
-            if DEBUG:
+            if DEBUG_SIGNAL:
                 if not _Log:
                     _late_import()
-                _Log.note("Thread {{thread|quote}} signaled {{name|quote}}", thread=Thread.current().name, name=self.name)
             self._go = True
             jobs = self.job_queue
             self.job_queue = []
@@ -732,6 +746,8 @@ class Signal(object):
             try:
                 j()
             except Exception, e:
+                if not _Log:
+                    _late_import()
                 _Log.warning("Trigger on Signal.go() failed!", cause=e)
 
     def is_go(self):
@@ -746,11 +762,13 @@ class Signal(object):
         RUN target WHEN SIGNALED
         """
         if not target:
+            if not _Log:
+                _late_import()
             _Log.error("expecting target")
 
         with self.lock:
             if self._go:
-                if DEBUG:
+                if DEBUG_SIGNAL:
                     if not _Log:
                         _late_import()
                     _Log.note("Signal {{name|quote}} already triggered, running job immediately", name=self.name)
@@ -759,7 +777,7 @@ class Signal(object):
                 if DEBUG:
                     if not _Log:
                         _late_import()
-                    _Log.note("Adding job to signal {{name|quote}}", name=self.name)
+                    _Log.note("Adding target to signal {{name|quote}}", name=self.name)
                 self.job_queue.append(target)
 
     @property

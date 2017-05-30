@@ -7,19 +7,19 @@
 # Author: Kyle Lahnakoski (kyle@lahnakoski.com)
 #
 
-from __future__ import unicode_literals
 from __future__ import division
-import ast
+from __future__ import unicode_literals
 
+import ast
 import re
 
-from pyLibrary import convert, strings
-from pyLibrary.debugs.exceptions import suppress_exception
-from pyLibrary.debugs.logs import Log
-from pyLibrary.dot import wrap, Dict, coalesce, set_default, unwraplist
+from mo_dots import wrap, Data, coalesce, set_default, unwraplist, listwrap
+from pyLibrary import convert
+from mo_logs.exceptions import suppress_exception
+from mo_logs import Log, strings
 from pyLibrary.env import elasticsearch
-from pyLibrary.maths import Math
-from pyLibrary.times.dates import Date, unicode2Date
+from mo_math import Math
+from mo_times.dates import Date, unicode2Date
 
 BUILDBOT_LOGS = "http://builddata.pub.build.mozilla.org/builddata/buildjson/"
 
@@ -31,59 +31,80 @@ class BuildbotTranslator(object):
 
     def parse(self, data):
         data = wrap(data)
-        output = Dict()
+        output = Data()
+
+        if data.build.times:
+            if len(data.build.times) != 2:
+                Log.error("not expected")
+            data.build.result = data.results
+            data = data.build
+
+        if isinstance(data.properties, list):
+            props = data.properties = Data(**{a: b for a, b, c in data.properties})
+        else:
+            props = data.properties.copy()
 
         output.action.reason = data.reason
-        output.action.request_time = data.requesttime
-        output.action.start_time = data.starttime
-        output.action.end_time = data.endtime
-        output.action.buildbot_status = STATUS_CODES[data.result]
+        output.action.request_time = Date(data.requesttime)
+        output.action.start_time = coalesce(Date(data.starttime), Date(data.times[0]), Date(consume(data, "insertion_time")))
+        output.action.end_time = coalesce(Date(data.endtime), Date(data.times[1]))
+        output.action.buildbot_status = STATUS_CODES[coalesce(data.result, consume(data, "status"))]
 
-        props = data.properties
+        if data.actions:
+            Log.error("See actions")
+
+        if len({"buildername", "platform", "product"} - data.keys()) == 0:
+            props = data
         if not props or not props.buildername:
             output.properties, output.other = normalize_other(props)
             return output
 
+        if consume(props, "talos"):
+            output.action.type = "talos"
+
         # TASK CLUSTER ID
-        output.task.id = props.taskId
+        bbb_task_id = data.reason[24:] if data.reason.startswith("Created by BBB for task ") else None
+        output.task.id = coalesce(consume(props, "taskId"), bbb_task_id)
 
-        if props.taskId and data.reason.startswith("Created by BBB for task "):
-            output.properties, output.other = normalize_other(props)
-            return output
-
-        if data.reason.startswith("The web-page 'rebuild' button was pressed by "):
-            output.properties, output.other = normalize_other(props)
-            return output
-
-        output.action.job_number = props.buildnumber
-        for k, v in props.request_times.items():
+        output.action.job_number = coalesce(consume(props, "buildnumber"), consume(props, "job_number"), consume(props, "build_number"))
+        for k, v in consume(props, "request_times").items():
             output.action.requests += [{"request_id": int(k), "timestamp": v}]
+        consume(props, "request_ids")
 
-        output.run.key = key = props.buildername
-        if key.startswith("TB "):
-            key = key[3:]
+        output.run.timestamp = Date(consume(data, "timestamp"))
+        output.run.key = buildername = consume(props, "buildername")
+        consume(props, "key")  # THE PULSE KEY
+
+        if buildername.startswith("TB "):
+            buildername = buildername[3:]
 
         try:
-            ratio = RATIO_PATTERN.match(key.split("_")[-1])
+            ratio = RATIO_PATTERN.match(buildername.split("_")[-1])
             if ratio:
                 output.action.step = ratio.groups()[0]
-        except Exception, e:
+        except Exception as e:
             Log.error("problem in\n{{data|json}}", data=data, cause=e)
 
         # SCRIPT
-        output.run.script.url = props.script_repo_url
-        output.run.script.revision = props.script_repo_revision
+        output.run.script.url = consume(props, "script_repo_url")
+        output.run.script.revision = consume(props, "script_repo_revision")
 
-        # REVISIONS
-        output.build.revision = coalesce(props.revision, props.gecko_revision)
-        output.build.revision12 = output.build.revision[0:12]
+        # REPO AND REVISIONS
+        raw_release = consume(props, "release")
+        output.build.gaia_revision = consume(props, "gaia_revision")
+        output.build.gaia_revision12 = output.build.gaia_revision[0:12]
         if props.gecko_revision:
-            if props.gecko_revision[0:12] != output.build.revision12:
+            if props.revision and props.gecko_revision[0:12] != props.revision[0:12]:
                 Log.error("expecting revision to be the gecko revision\n{{data}}", data=data)
+            output.build.revision = coalesce(consume(props, "revision"), consume(props, "gecko_revision"), raw_release)
+            output.build.revision12 = output.build.revision[0:12]
             output.build.gecko_revision = output.build.revision
             output.build.gecko_revision12 = output.build.revision[0:12]
-            output.build.gaia_revision = props.gaia_revision
-            output.build.gaia_revision12 = props.gaia_revision[0:12]
+        else:
+            output.build.revision = coalesce(consume(props, "revision"), consume(props, "gecko_revision"), raw_release)
+            output.build.revision12 = output.build.revision[0:12]
+
+        consume(props, "commit_titles")
 
         # TODO: LOOKS LIKE A "release" LOOKUP CAN FILL IN THE REVISION
         #     if builddata['tree'].startswith('release-') and builddata['revision'] in [None, 'None']:
@@ -99,31 +120,32 @@ class BuildbotTranslator(object):
         #             # https://bugzilla.mozilla.org/show_bug.cgi?id=1219432#c1
         #             pass
 
-        output.version = props.version
+        output.build.version = consume(props, "version")
 
         # BUILD ID AND DATE
         try:
-            output.build.date = unicode2Date(props.buildid, "%Y%m%d%H%M%S")
-            output.build.id = props.buildid
-            props.buildid = None
+            output.build.id = consume(props, "buildid")
+            output.build.date = Date(consume(props, "builddate"))
+            if not output.build.date:
+                output.build.date = unicode2Date(output.build.id, "%Y%m%d%H%M%S")
         except Exception, _:
             output.build.id = "<error>"
 
         # LOCALE
-        output.build.locale = coalesce(props.locale, 'en-US')
+        output.build.locale = coalesce(consume(props, "locale"), 'en-US')
         if props.locales:  # nightly repack build
-            output.action.repack = True
-            data.build.locale = None
+            output.action.repack = coalesce(consume(props, "repack"), True)
+            locales = consume(props, "locales")
             try:
-                data.build.locales = convert.json2value(props.locales).keys()
+                output.build.locales = convert.json2value(locales).keys()
             except Exception:
-                data.build.locales = props.locales.split(",")
+                output.build.locales = locales.split(",")
 
-        output.build.url = coalesce(props.packageUrl, props.build_url, props.fileURL)
-        output.run.logurl = props.log_url
-        output.build.release = coalesce(props.en_revision, props.script_repo_revision)
-        output.run.machine.name = coalesce(props.slavename, props.aws_instance_id)
-        output.run.machine.aws_id = props.aws_instance_id
+        output.build.url = coalesce(consume(props, "packageUrl"), consume(props, "build_url"), consume(props, "buildurl"), consume(props, "fileURL"))
+        output.run.logurl = coalesce(consume(props, "log_url"), consume(props, "logurl"))
+        output.build.release = coalesce(raw_release, consume(props, "en_revision"), output.run.script.revision)
+        output.run.machine.aws_id = consume(props, "aws_instance_id")
+        output.run.machine.name = coalesce(consume(props, "slavename"), consume(props, "slave"), output.run.machine.aws_id)
         split_name = output.run.machine.name.split("-")
         if Math.is_integer(split_name[-1]):
             # EXAMPLES
@@ -132,33 +154,37 @@ class BuildbotTranslator(object):
             # bld-linux64-spot-013
             # panda-0150
             output.run.machine.pool = "-".join(split_name[:-1])
-        output.run.machine.aws_type = props.aws_instance_type
+        output.run.machine.aws_type = consume(props, "aws_instance_type")
 
         # FILES
+        blobber_files = consume(props, "blobber_files")
         try:
-            if props.blobber_files:
-                files = convert.json2value(props.blobber_files)
+            if blobber_files:
+                try:
+                    files = convert.json2value(blobber_files)
+                except Exception:
+                    files = blobber_files
                 output.run.files = [
                     {"name": name, "url": url}
                     for name, url in files.items()
                 ]
-        except Exception, e:
-            Log.error("Malformed `blobber_files` buildbot property: {{json}}", json=props.blobber_files, cause=e)
+        except Exception as e:
+            Log.error("Malformed `blobber_files` buildbot property: {{json}}", json=blobber_files, cause=e)
 
         # PRODUCT
-        output.build.product = props.product.lower()
-        if "xulrunner" in key:
+        output.build.product = consume(props, "product").lower()
+        if "xulrunner" in buildername:
             output.build.product = "xulrunner"
 
         # PLATFORM
-        raw_platform = props.platform
+        raw_platform = consume(props, "platform")
         if raw_platform:
-            if "Code Coverage " in key:
+            if "Code Coverage " in buildername:
                 if raw_platform.endswith("-cc"):
                     raw_platform = raw_platform[:-3]
                 else:
-                    Log.error("Not recognized: {{key}}\n{{data|json}}", key=key, data=data)
-                key = key.replace("Code Coverage ", "")
+                    Log.error("Not recognized: {{key}}\n{{data|json}}", key=buildername, data=data)
+                buildername = buildername.replace("Code Coverage ", "")
                 output.tags += ["code coverage"]
 
             if raw_platform not in KNOWN_PLATFORM:
@@ -167,14 +193,23 @@ class BuildbotTranslator(object):
             set_default(output, KNOWN_PLATFORM[raw_platform])
 
         # BRANCH
-        output.build.branch = branch_name = props.branch.split("/")[-1]
+        output.build.branch = branch_name = coalesce(consume(props, "tree"), consume(props, "branch")).split("/")[-1]
         if not branch_name:
-            Log.error("{{key|quote}} no 'branch' property", key=key)
+            Log.error("{{key|quote}} no 'branch' property", key=buildername)
+        consume(props, "repo_path")
 
-        if 'release' in key:
+        if 'release' in buildername:
             output.tags += ['release']
-        if key.endswith("nightly"):
+        if buildername.endswith("nightly"):
             output.tags += ["nightly"]
+
+        # PGO MARKUP
+        pgo_build = unquote(consume(props, "pgo_build"))
+        if pgo_build:
+            output.build.type += ["pgo"]
+        buildtype = consume(props, "buildtype")
+        if buildtype:
+            output.build.type += [buildtype]
 
         # DECODE buildername
         for b in BUILDER_NAMES:
@@ -186,70 +221,69 @@ class BuildbotTranslator(object):
                 "vm": output.run.machine.vm,
                 "step": output.action.step,
             })
-            if key == expected:
-                output.build.name = props.buildername
-                scrub_known_properties(props)
+            if buildername == expected:
+                output.build.name = buildername
                 output.properties, output.other = normalize_other(props)
                 output.action.type = coalesce(output.action.type, "build")
                 verify(output, data)
                 return output
 
-        if key.startswith("fuzzer"):
+        if buildername.startswith("fuzzer"):
             output.build.product = "fuzzing"
             pass
-        elif 'l10n' in key or 'repack' in key:
+        elif 'l10n' in buildername or 'repack' in buildername:
             output.action.repack = True
-        elif key.startswith("jetpack-"):
+        elif buildername.startswith("jetpack-"):
             for t in BUILD_TYPES:
-                if key.endswith("-" + t):
+                if buildername.endswith("-" + t):
                     output.build.type += [t]
 
             match = re.match(strings.expand_template(
                 "jetpack-(.*)-{{platform}}-{{type}}",
                 {
                     "platform": raw_platform,
-                    "type": unwraplist(output.build.type)
+                    "type": unwraplist(list(set(listwrap(output.build.type))))
                 }
-            ), key)
+            ), buildername)
 
             if not match:
-                Log.error("Not recognized: {{key}} in \n{{data|json}}", key=key, data=data)
+                Log.error("Not recognized: {{key}} in \n{{data|json}}", key=buildername, data=data)
 
             if branch_name == "addon-sdk":
                 output.build.branch = match.groups()[0]
-        elif key.startswith("b2g_" + branch_name + "_") and endswith(key, ["nightly", "periodic", "dep", "build", "nonunified"]):
-            output.build.trigger = trigger = endswith(key, ["nightly", "periodic", "dep", "build", "nonunified"])
-            output.build.name = raw_platform = key[5 + len(branch_name):-(len(trigger) + 1)]
+        elif buildername.startswith("b2g_" + branch_name + "_") and endswith(buildername, ["nightly", "periodic", "dep", "build", "nonunified"]):
+            output.build.trigger = trigger = endswith(buildername, ["nightly", "periodic", "dep", "build", "nonunified"])
+            output.build.name = raw_platform = buildername[5 + len(branch_name):-(len(trigger) + 1)]
             output.action.type = "build"
             if raw_platform not in KNOWN_PLATFORM:
                 if raw_platform not in self.unknown_platforms:
                     self.unknown_platforms += [raw_platform]
                     Log.error("Platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                 else:
-                    return Dict()  # ERROR INGNORED, ALREADY SENT
+                    return Data()  # ERROR INGNORED, ALREADY SENT
             set_default(output, KNOWN_PLATFORM[raw_platform])
-        elif key.endswith("nightly"):
+        elif buildername.endswith("nightly"):
             output.build.trigger = "nightly"
             try:
-                temp = key.split(" " + branch_name + " ")
+                temp = buildername.split(" " + branch_name + " ")
                 if len(temp) == 1:
                     raw_platform = temp[0]
                     build = ""
                 else:
                     raw_platform, build = temp[0:2]
 
-                output.build.name = props.buildername
+                output.build.name = buildername
                 set_default(output, TEST_PLATFORMS[raw_platform])
 
                 for t in BUILD_TYPES:
                     if t in build:
                         output.build.type += [t]
             except Exception:
-                Log.error("Not recognized: {{key}} in \n{{data|json}}", key=key, data=data)
+                Log.error("Not recognized: {{key}} in \n{{data|json}}", key=buildername, data=data)
 
-        elif key.endswith("build"):
+        elif buildername.endswith("build"):
             try:
-                temp = key.split(" " + branch_name + " ")
+                temp = buildername.split(" " + branch_name + " ")
                 if len(temp) == 1:
                     raw_platform = temp[0]
                     build = ""
@@ -262,29 +296,34 @@ class BuildbotTranslator(object):
                         self.unknown_platforms += [raw_platform]
                         Log.error("Test platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                     else:
-                        return Dict()  # ERROR INGNORED, ALREADY SENT
+                        return Data()  # ERROR INGNORED, ALREADY SENT
                 set_default(output, TEST_PLATFORMS[raw_platform])
                 output.action.type = "build"
-            except Exception, e:
-                raise Log.error("Not recognized: {{key}}\n{{data|json}}", key=key, data=data, cause=e)
+            except Exception as e:
+                raise Log.error("Not recognized: {{key}}\n{{data|json}}", key=buildername, data=data, cause=e)
 
             for t in BUILD_TYPES:
                 if t in build:
                     output.build.type += [t]
-        elif key.endswith("non-unified"):
-            output.build.name = props.buildername
-            raw_platform, build = key.split(" " + branch_name + " ")
+        elif buildername.endswith("non-unified"):
+            output.build.name = buildername
+            raw_platform, build = buildername.split(" " + branch_name + " ")
             set_default(output, TEST_PLATFORMS[raw_platform])
-        elif key.endswith("valgrind"):
-            output.build.name = props.buildername
-            raw_platform, build = key.split(" " + branch_name + " ")
+        elif buildername.endswith("valgrind"):
+            output.build.name = consume(props, "buildername")
+            raw_platform, build = buildername.split(" " + branch_name + " ")
             set_default(output, TEST_PLATFORMS[raw_platform])
         else:
             # FORMAT: <platform> <branch> <test_mode> <test_name> <other>
             try:
-                raw_platform, test = key.split(" " + branch_name + " ")
+                raw_platform, test = buildername.split(" " + branch_name + " ")
             except Exception:
-                Log.error("No recognized branch name: {{key}}\n{{data}}", key=key, data=data)
+                raise Log.error("No recognized branch name: {{key}}\n{{data}}", key=buildername, data=data)
+
+            raw_test = consume(props, "test")
+            raw_test = raw_test.replace("-pgo", "")  # NOT A TEST PROPERTY
+            if raw_test and raw_test not in test:
+                Log.error("do not know how to handle test discrepancy")
 
             output.build.name = raw_platform
             if raw_platform not in TEST_PLATFORMS:
@@ -293,13 +332,16 @@ class BuildbotTranslator(object):
                     self.unknown_platforms += [raw_platform]
                     Log.error("Test Platform not recognized: {{platform}}\n{{data}}", platform=raw_platform, data=data)
                 else:
-                    return Dict()  # ERROR INGNORED, ALREADY SENT
+                    return Data()  # ERROR INGNORED, ALREADY SENT
 
             set_default(output, TEST_PLATFORMS[raw_platform])
 
             parsed = parse_test(test, output)
             if not parsed:
-                Log.error("Test mode not recognized: {{key}}\n{{data|json}}", key=key, data=data)
+                Log.error("Test mode not recognized: {{key}}\n{{data|json}}", key=buildername, data=data)
+
+        # OS MARKUP
+        output.run.os = coalesce(output.run.os, consume(data, "os"))
 
         verify(output, data)
         output.properties, output.other = normalize_other(props)
@@ -307,8 +349,17 @@ class BuildbotTranslator(object):
         return output
 
 
+def consume(props, key):
+    output, props[key] = props[key], None
+    return output
+
+
 def verify(output, data):
-    if "e10s" in data.properties.buildername.lower() and output.run.type != 'e10s':
+    output.run.type = list(set(listwrap(output.run.type)))
+    output.build.type = list(set(listwrap(output.build.type)))
+    output.build.tags = list(set(output.build.tags))
+
+    if "e10s" in data.properties.buildername.lower() and 'e10s' not in output.run.type:
         Log.error("Did not pickup e10s in\n{{data|json}}", data=data)
     if output.run.machine.os != None and output.run.machine.os not in ALLOWED_OS:
         ALLOWED_OS.append(output.run.machine.os)
@@ -320,13 +371,9 @@ def verify(output, data):
         ALLOWED_PRODUCTS.append(output.build.product)
         Log.error("Bad Product {{product}}\n{{data|json}}", product=output.build.product, data=data)
 
-    output.build.tags = set(output.build.tags)
-    output.build.type = set(output.build.type)
-    scrub_known_properties(data.properties)
-
 
 def parse_test(test, output):
-    # "web-platform-tests-e10s-7"
+    # "test web-platform-tests-e10s-7"
     test = test.lower()
 
     # CHUNK NUMBER
@@ -337,7 +384,7 @@ def parse_test(test, output):
 
     if "-e10s" in test:
         test = test.replace("-e10s", "")
-        output.run.type = "e10s"
+        output.run.type += ["e10s"]
 
     for m, d in test_modes.items():
         if test.startswith(m):
@@ -346,37 +393,6 @@ def parse_test(test, output):
             return True
 
     return False
-
-def scrub_known_properties(props):
-    props.aws_instance_id = None
-    props.aws_instance_type = None
-    props.blobber_files = None
-    props.branch = None
-    props.buildername = None
-    # props.buildid = None   # SOMETIMES THIS IS BADLY FORMATTED, KEEP IT
-    props.buildnumber = None
-    props.build_url = None
-    props.commit_titles = None  # DO NOT STORE
-    props.fileURL = None
-    props.en_revision = None,
-    props.gecko_revision = None
-    props.gaia_revision = None
-    props.locale = None
-    props.locales = None
-    props.log_url = None
-    props.packageUrl = None
-    props.platform = None
-    props.product = None
-    props.request_ids = None
-    props.request_times = None
-    props.revision = None
-    props.repo_path = None
-    props.script_repo_revision = None
-    props.script_repo_url = None
-    props.slavename = None
-    props.version = None
-    props.uploadFiles = unquote(props.uploadFiles)
-    props.partialInfo = unquote(props.partialInfo)
 
 
 def unquote(value):
@@ -389,14 +405,11 @@ def unquote(value):
     return value
 
 
-
-
-
 def normalize_other(other):
     """
-    the buildbot properties are unlimited in thie number of keys
+    the buildbot properties are unlimited in their number of keys
     """
-    known = {}
+    known = Data()
     unknown = []
     for k, v in other.items():
         v = elasticsearch.scrub(v)
@@ -410,8 +423,21 @@ def normalize_other(other):
         if k not in unknown_properties:
             Log.alert("unknown properties: {{name|json}}", name=unknown_properties)
         unknown_properties[k] += 1
-        unknown.append({"name": unicode(k), "value": unicode(v)})
+        if isinstance(v, (list, dict, Data)):
+            unknown.append({"name": unicode(k), "value": convert.value2json(v)})
+        elif Math.is_number(v):
+            unknown.append({"name": unicode(k), "value": convert.value2number(v)})
+        elif v in [True, "true", "True"]:
+            unknown.append({"name": unicode(k), "value": True})
+        elif v in [False, "false", "False"]:
+            unknown.append({"name": unicode(k), "value": False})
+        elif isinstance(v, unicode):
+            unknown.append({"name": unicode(k), "value": v})
+        else:
+            Log.error("Do not know how to handle type {{type}}", type=v.__class__.__name__)
 
+    known.uploadFiles = unquote(known.uploadFiles)
+    known.partialInfo = unquote(known.partialInfo)
     return known, unknown
 
 
@@ -437,10 +463,11 @@ known_properties = {
     "uploadFiles"
 }
 
-unknown_properties=Dict()
+unknown_properties=Data()
 
 
 test_modes = {
+    "test": {"action": {"type": "test"}},
     "debug test": {"build": {"type": ["debug"]}, "action": {"type": "test"}},
     "opt test": {"build": {"type": ["opt"]}, "action": {"type": "test"}},
     "pgo test": {"build": {"type": ["pgo"]}, "action": {"type": "test"}},
@@ -449,7 +476,6 @@ test_modes = {
 }
 
 BUILDER_NAMES = [
-
     '{{branch}}-{{product}}_{{platform}}_build',
     '{{branch}}-{{product}}_antivirus',
     '{{branch}}-{{product}}_almost_ready_for_release',
@@ -503,6 +529,16 @@ BUILDER_NAMES = [
     '{{platform}} {{branch}} periodic file update',
     'Linux x86-64 {{branch}} periodic file update',  # THE platform DOES NOT MATCH
     'linux64-br-haz_{{branch}}_dep',
+    'release-{{branch}}_{{product}}_{{platform}}_update_verify',
+    'release-{{branch}}_{{product}}_bncr_sub',
+    'release-{{branch}}-{{product}}_bncr_sub',
+    'release-{{branch}}-{{product}}_bouncer_aliases',
+    'release-{{branch}}-{{product}}_chcksms',
+    'release-{{branch}}-{{product}}_publish_balrog',
+    'release-{{branch}}-{{product}}_mark_as_shipped',
+    'release-{{branch}}-{{product}}_updates',
+    'release-{{branch}}-{{product}}_version_bump',
+    'release-{{branch}}-{{product}}_uptake_monitoring',
     '{{vm}}_{{branch}}_{{clean_platform}} nightly',
     '{{vm}}_{{branch}}_{{clean_platform}} build'
 ]
@@ -516,7 +552,10 @@ BUILD_TYPES = [
     "tsan",   # THREAD SANITIZER
     "l10n",   # INTERNATIONALIZATION
     "leak test",
-    "static analysis"
+    "static analysis",
+    "ccov",   # C/C++ CODE COVERAGE
+    "ubsan",  #
+    "jsdcov"  # JAVASCRIPT CODE COVERAGE
 
 ]
 
@@ -556,21 +595,28 @@ TEST_PLATFORMS = {
     "Rev5 MacOSX Yosemite 10.10": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
     "Rev5 MacOSX Yosemite 10.10.5": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
     "Rev7 MacOSX Yosemite 10.10.5": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
+    "Rev7 MacOSX Yosemite 10.10.5 DevEdition": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64", "type": ["devedition"]}},
     "Ubuntu ASAN VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["asan"]}},
     "Ubuntu ASAN VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["asan"]}},
     "Ubuntu TSAN VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["tsan"]}},
     "Ubuntu TSAN VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["tsan"]}},
     "Ubuntu HW 12.04": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux32"}},
     "Ubuntu HW 12.04 x64": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64"}},
+    "Ubuntu HW 12.04 x64 stylo": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo"]}},
+    "Ubuntu HW 12.04 x64 stylo-sequential": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo", "sequential"]}},
     "Ubuntu VM 12.04": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux32"}},
     "Ubuntu VM 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "Ubuntu VM large 12.04 x64": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "Ubuntu VM 12.04 x64 Mulet": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64", "type": ["mulet"]}},
     "Windows XP 32-bit": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "Windows 7 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
+    "Windows 7 32-bit DevEdition": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32", "type": ["devedition"]}},
     "Windows 7 VM 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
-    "Windows 7 VM-GFX 32-bit": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32"}},
+    "Windows 7 VM 32-bit DevEdition": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win32", "type": ["devedition"]}},
+    "Windows 7 VM-GFX 32-bit": {"run": {"machine": {"os": "win7"}, "type": ["gfx"]}, "build": {"platform": "win32"}},
+    "Windows 7 VM-GFX 32-bit DevEdition": {"run": {"machine": {"os": "win7"}, "type": ["gfx"]}, "build": {"platform": "win32", "type": ["devedition"]}},
     "Windows 8 64-bit": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
+    "Windows 8 64-bit DevEdition": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64", "type": ["devedition"]}},
     "Windows 10 64-bit": {"run": {"machine": {"os": "win10"}}, "build": {"platform": "win64"}},
     "WINNT 5.2": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win64"}},
     "WINNT 5.2 add-on-devel": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win64", "type": ["add-on"]}},
@@ -685,6 +731,7 @@ KNOWN_PLATFORM = {
     "macosx64": {"build": {"platform": "macosx64"}},
     "macosx64-add-on-devel": {"build": {"platform": "macosx64", "type": ["add-on"]}},
     "macosx64-debug": {"build": {"platform": "macosx64", "type": ["debug"]}},
+    "macosx64-devedition":  {"build": {"platform": "macosx64", "type":["devedition"]}},
     "macosx64_gecko": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g"}},
     "macosx64_gecko-debug": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g", "type": ["debug"]}},
     "macosx64_gecko_localizer": {},
@@ -708,10 +755,13 @@ KNOWN_PLATFORM = {
     "ubuntu64_hw": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64"}},
     "ubuntu64_vm": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
     "ubuntu64_vm_lnx_large": {"run": {"machine": {"os": "ubuntu", "type": "vm"}}, "build": {"platform": "linux64"}},
+    "ubuntu64_hw_stylo": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo"]}},
+    "ubuntu64_hw_styloseq": {"run": {"machine": {"os": "ubuntu"}}, "build": {"platform": "linux64", "type": ["stylo", "sequential"]}},
     "wasabi": {"run": {"machine": {"os": "b2g"}}, "build": {"platform": "wasabi"}},
     "win32": {"build": {"platform": "win32"}},
     "win32-add-on-devel": {"build": {"platform": "win32", "type": ["add-on"]}},
     "win32-debug": {"build": {"platform": "win32", "type": ["debug"]}},
+    "win32-devedition": {"build": {"platform": "win32", "type": ["debug", "devedition"]}},
     "win32-mulet": {"build": {"platform": "win32", "type": ["mulet"]}},
     "win32_gecko": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g"}},
     "win32_gecko-debug": {"run": {"machine": {"os": "b2g", "type": "emulator"}}, "build": {"platform": "b2g", "type": ["debug"]}},
@@ -720,18 +770,22 @@ KNOWN_PLATFORM = {
     "win64": {"build": {"platform": "win64"}},
     "win64-add-on-devel": {"build": {"platform": "win64", "type": ["add-on"]}},
     "win64-debug": {"build": {"platform": "win64", "type": ["debug"]}},
-    "win64_graphene": {"run": {"machine": {"vm": "graphene"}}, "build": {"platform": "win64"}},
+    "win64-devedition":  {"build": {"platform": "win64", "type":["devedition"]}},
+    "win64_graphene": {"run": {"machine": {"vm": "graphene"}}, "build": {"platform": "win64", "type":["devedition"]}},
     "win64_horizon": {"run": {"machine": {"vm": "horizon"}}, "build": {"platform": "win64"}},
     "win64-rev2": {"build": {"platform": "win64"}},
     "win7-ix": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
     "win7_ix": {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
+    "win7_ix_devedition":  {"run": {"machine": {"os": "win7"}}, "build": {"platform": "win64"}},
     "win8": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
     "win8_64": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64"}},
+    "win8_64_devedition": {"run": {"machine": {"os": "win8"}}, "build": {"platform": "win64", "type":["devedition"]}},
     "win10_64": {"run": {"machine": {"os": "win10"}}, "build": {"platform": "win64"}},
     "xp-ix": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "xp_ix": {"run": {"machine": {"os": "winxp"}}, "build": {"platform": "win32"}},
     "yosemite": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
-    "yosemite_r7": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}}
+    "yosemite_r7": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64"}},
+    "yosemite_r7_devedition": {"run": {"machine": {"os": "yosemite 10.10"}}, "build": {"platform": "macosx64", "type":["devedition"]}}
 }
 
 
@@ -760,7 +814,8 @@ ALLOWED_PRODUCTS = [
     "mobile",
     "spidermonkey",
     "thunderbird",
-    "xulrunner"
+    "xulrunner",
+    "devedition"
 ]
 
 

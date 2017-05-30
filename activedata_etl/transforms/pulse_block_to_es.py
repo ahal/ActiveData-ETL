@@ -6,32 +6,32 @@
 #
 # Author: Kyle Lahnakoski (kyle@lahnakoski.com)
 #
-from __future__ import unicode_literals
 from __future__ import division
+from __future__ import unicode_literals
 
-from activedata_etl.transforms import TRY_AGAIN_LATER
-from pyLibrary import convert, strings
-from pyLibrary.debugs.logs import Log
-from pyLibrary.debugs.profiles import Profiler
-from pyLibrary.env.git import get_git_revision
-from pyLibrary.dot import Dict, wrap, Null, listwrap
-from pyLibrary.maths import Math
-from pyLibrary.times.dates import Date
 from activedata_etl import etl2key
-from activedata_etl.imports import buildbot
+from activedata_etl.imports.buildbot import BuildbotTranslator
+from activedata_etl.transforms import TRY_AGAIN_LATER
 from mohg.hg_mozilla_org import DEFAULT_LOCALE
 from mohg.repos.changesets import Changeset
 from mohg.repos.revisions import Revision
+from mo_dots import Data, Null
+from pyLibrary import convert
+from mo_logs import Log, strings
+from mo_logs.profiles import Profiler
+from pyLibrary.env.git import get_git_revision
 
 DEBUG = True
+bb = BuildbotTranslator()
 
 
 def process(source_key, source, destination, resources, please_stop=None):
+
     lines = source.read_lines()
 
     keys = []
     records = []
-    stats = Dict()
+    stats = Data()
     for i, line in enumerate(lines):
         if please_stop:
             Log.error("Unexpected request to stop")
@@ -43,16 +43,23 @@ def process(source_key, source, destination, resources, please_stop=None):
 
             with Profiler("transform_buildbot"):
                 record = transform_buildbot(source_key, pulse_record.payload, resources=resources)
+                key = pulse_record._meta.routing_key
+                key_path = key.split(".")
+                pulse_id = ".".join(key_path[:-1])
+                pulse_action = key_path[-1]
+
                 record.etl = {
                     "id": i,
                     "source": pulse_record.etl,
                     "type": "join",
-                    "revision": get_git_revision()
+                    "revision": get_git_revision(),
+                    "pulse_key": pulse_id,
+                    "pulse_action": pulse_action
                 }
             key = etl2key(record.etl)
             keys.append(key)
             records.append({"id": key, "value": record})
-        except Exception, e:
+        except Exception as e:
             if TRY_AGAIN_LATER:
                 Log.error("Did not finish processing {{key}}", key=source_key, cause=e)
             Log.warning("Problem with pulse payload {{pulse|json}}", pulse=pulse_record.payload, cause=e)
@@ -70,29 +77,8 @@ def scrub_pulse_record(source_key, i, line, stats):
         if not line:
             return None
         pulse_record = convert.json2value(line)
-        if pulse_record._meta:
-            pulse_record.etl.source.id = pulse_record.etl.source.count  # REMOVE AFTER JULY 1 2015, JUST A FEW RECORDS HAVE THIS PROBLEM
-            return pulse_record
-        elif pulse_record.locale:
-            stats.num_missing_envelope += 1
-            pulse_record = wrap({
-                "payload": pulse_record,
-                "etl": pulse_record.etl
-            })
-            return pulse_record
-        else:
-            if i == 0 and pulse_record.source:
-                #OLD-STYLE ETL HAD A HEADER RECORD
-                return None
-
-            Log.warning(
-                "Line {{index}}: Do not know how to handle line for key {{key}}\n{{line}}",
-                line=line,
-                index=i,
-                key=source_key
-            )
-            return None
-    except Exception, e:
+        return pulse_record
+    except Exception as e:
         Log.warning(
             "Line {{index}}: Problem with line for key {{key}}\n{{line}}",
             line=line,
@@ -102,96 +88,22 @@ def scrub_pulse_record(source_key, i, line, stats):
         )
 
 
+def transform_buildbot(source_key, other, resources):
+    output = Data()
 
-def transform_buildbot(source_key, payload, resources, filename=None):
-    output = Dict()
-
-    if payload.what == "This is a heartbeat":
+    if other.what == "This is a heartbeat":
         return output
 
-    output.run.files = payload.blobber_files
-    output.build.date = payload.builddate
-    output.build.name = payload.buildername
-    output.build.id = payload.buildid
-    output.build.type = listwrap(payload.buildtype)
-    if "e10s" in payload.key.lower():
-        output.run.type += ["e10s"]
-
-    output.build.url = payload.buildurl
-    output.run.job_number = payload.job_number
-
-    # TODO: THESE SHOULD BE ETL PROPERTIES
-    output.run.insertion_time = payload.insertion_time
-    output.run.key = payload.key
-
-    output.build.locale = fix_locale(payload.locale)
-    output.run.logurl = payload.logurl
-    output.run.machine.os = payload.os
-    output.build.platform = payload.platform
-    output.build.product = payload.product
-    output.build.release = payload.release
-    output.build.revision = payload.revision
-    output.build.revision12 = payload.revision[0:12]
-    output.run.machine.name = payload.slave
-
-    # payload.status IS THE BUILDBOT STATUS
-    # https://github.com/mozilla/pulsetranslator/blob/acf495738f8bd119f64820958c65e348aa67963c/pulsetranslator/pulsetranslator.py#L295
-    # https://hg.mozilla.org/build/buildbot/file/fbfb8684802b/master/buildbot/status/builder.py#l25
-    try:
-        output.run.buildbot_status = buildbot.STATUS_CODES[payload.status]
-    except Exception, e:
-        Log.warning("It seems the Pulse payload status {{status|quote}} has no string representative", status=payload.status)
-
-    output.run.talos = payload.talos
-    output.run.suite = payload.test
-    output.run.timestamp = Date(payload.timestamp).unix
-    output.build.branch = payload.tree
-
-    # JUST IN CASE THERE ARE MORE PROPERTIES
-    output.other = payload = payload.copy()
-    payload.blobber_files = None
-    payload.builddate = None
-    payload.buildername = None
-    payload.buildid = None
-    payload.buildtype = None
-    payload.buildurl = None
-    payload.etl = None
-    payload.insertion_time = None
-    payload.job_number = None
-    payload.key = None
-    payload.locale = None
-    payload.logurl = None
-    payload.os = None
-    payload.platform = None
-    payload.product = None
-    payload.release = None
-    payload.revision = None
-    payload.slave = None
-    payload.status = None
-    payload.talos = None
-    payload.test = None
-    payload.timestamp = None
-    payload.tree = None
-
-    path = output.run.suite.split("-")
-    if Math.is_integer(path[-1]):
-        output.run.chunk = int(path[-1])
-        output.run.suite = "-".join(path[:-1])
-
-    output.run.files = [
-        {"name": name, "url": url}
-        for name, url in output.run.files.items()
-        if filename is None or name == filename
-    ]
+    output = bb.parse(other)
 
     if output.build.branch:
         rev = Revision(branch={"name": output.build.branch}, changeset=Changeset(id=output.build.revision))
         locale = output.build.locale.replace("en-US", DEFAULT_LOCALE)
         try:
             output.repo = resources.hg.get_revision(rev, locale)
-        except Exception, e:
-            if "release-mozilla-esr" in e:
-                # FOR SOME REASON WE CAN NOT FIND THE REVISIONS FOR ESR
+        except Exception as e:
+            if "release-mozilla-esr" in e or "release-comm-esr" in e:
+                # TODO: FIX PROBLEM WHERE, FOR SOME REASON, WE CAN NOT FIND THE REVISIONS FOR ESR
                 pass
             else:
                 Log.warning(
@@ -204,27 +116,9 @@ def transform_buildbot(source_key, payload, resources, filename=None):
                     cause=e
                 )
 
-        try:
-            if output.build.branch and output.build.revision:
-                output.treeherder = resources.treeherder.get_markup(
-                    output.build.branch,
-                    output.build.revision,
-                    None,
-                    output.build.name,
-                    output.run.timestamp
-                )
-        except Exception, e:
-            if TRY_AGAIN_LATER in e:
-                Log.error("Looks like TH is not done processing.  Aborting processing of {{key}}", key=source_key, cause=e)
-
-            Log.warning(
-                "Could not lookup Treeherder data for {{key}} and revision={{revision}}",
-                key=source_key,
-                revision=output.build.revision12,
-                cause=e
-            )
     else:
-        Log.warning("No branch!\n{{output|indent}}", output=output)
+        bb.parse(other)
+        Log.warning("No branch for {{key}}!\n{{output|indent}}", key=source_key, output=other)
 
     return output
 
