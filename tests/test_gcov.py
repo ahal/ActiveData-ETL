@@ -18,8 +18,10 @@ from mo_files import File
 from mo_logs import constants
 
 from activedata_etl.imports import parse_lcov
-from activedata_etl.transforms import gcov_to_es
+from activedata_etl.transforms import gcov_to_es, cov_to_es
 from activedata_etl.transforms.gcov_to_es import process_directory, process_gcda_artifact
+from pyLibrary.aws.s3 import PublicBucket
+from pyLibrary.env import http
 
 
 class TestGcov(unittest.TestCase):
@@ -74,6 +76,28 @@ class TestGcov(unittest.TestCase):
             please_stop=Null
         )
 
+    def test_per_test_gcda(self):
+        source_key = "tc.1196746:119673763"
+        source = Source("https://s3-us-west-2.amazonaws.com/active-data-task-cluster-normalized/tc.1196746%3A119673763.json.gz")
+
+        destination = Destination("results/ccov/per_test_parsing_result.json.gz")
+        cov_to_es.process(
+            source_key,
+            source,
+            destination,
+            Null,
+            please_stop=None
+        )
+
+
+class Source(object):
+
+    def __init__(self, url):
+        self.url=url
+
+    def read_lines(self):
+        return http.get(self.url).all_lines
+
 
 class Destination(object):
 
@@ -82,6 +106,7 @@ class Destination(object):
         self.count = 0
 
     def write_lines(self, key, lines):
+        File(self.filename).write(u"")  # ENSURE IT EXISTS
         archive = gzip.GzipFile(self.filename, mode='w')
         for l in lines:
             archive.write(l.encode("utf8"))

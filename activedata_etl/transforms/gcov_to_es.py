@@ -73,10 +73,10 @@ def process_gcda_artifact(source_key, resources, destination, gcda_artifact, tas
 
 
 def unzip_files(gcno_file, gcda_file, dest_dir):
-    Log.note('Extracting gcno files to {{dir}}', dir=dest_dir)
-    ZipFile(gcno_file).extractall(dest_dir)
-    Log.note('Extracting gcda files to {{dir}}', dir=dest_dir)
-    ZipFile(gcda_file).extractall(dest_dir)
+    with Timer('Extracting gcno files to {{dir}}', {"dir":dest_dir}):
+        ZipFile(gcno_file).extractall(dest_dir)
+    with Timer('Extracting gcda files to {{dir}}', {"dir":dest_dir}):
+        ZipFile(gcda_file).extractall(dest_dir)
 
 
 def process_directory(source_key, tmpdir, gcno_file, gcda_file, destination, task_cluster_record, file_etl, please_stop):

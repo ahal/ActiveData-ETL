@@ -11,6 +11,7 @@ from __future__ import unicode_literals
 
 from activedata_etl.imports.task import minimize_task
 from activedata_etl.transforms import EtlHeadGenerator, TRY_AGAIN_LATER
+from activedata_etl.transforms.gcov_to_es import process_gcda_artifact
 from activedata_etl.transforms.grcov_to_es import process_grcov_artifact
 from activedata_etl.transforms.jsvm_to_es import process_jsvm_artifact
 from mo_json import json2value
@@ -36,6 +37,7 @@ def process(source_key, source, destination, resources, please_stop=None):
     :return: The list of keys of files in the destination bucket
     """
     keys = []
+    coverage_artifact_exists = False
 
     for msg_line_index, msg_line in enumerate(list(source.read_lines())):
         if please_stop:
@@ -54,7 +56,6 @@ def process(source_key, source, destination, resources, please_stop=None):
         minimize_task(task_cluster_record)
 
         etl_header_gen = EtlHeadGenerator(source_key)
-        coverage_artifact_exists = False
 
         for artifact in artifacts:
             try:
@@ -118,7 +119,7 @@ def process(source_key, source, destination, resources, please_stop=None):
                 #     _, artifact_etl = etl_header_gen.next(source_etl=parent_etl, url=artifact.url)
                 #     if DEBUG:
                 #         Log.note("Processing gcda artifact: {{url}}", url=artifact.url)
-                #
+                # 
                 #     keys.extend(process_gcda_artifact(
                 #         source_key,
                 #         resources,
